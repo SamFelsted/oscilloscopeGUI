@@ -1,12 +1,23 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Line } from 'react-chartjs-2';
 import { invoke } from "@tauri-apps/api/core";
-import { Chart as ChartJS, LineElement, PointElement, LinearScale, CategoryScale, ChartOptions, ChartData, Tooltip, Title } from 'chart.js';
-import SettingsModal from './SettingsModal';
+import {
+    Chart as ChartJS,
+    LineElement,
+    PointElement,
+    LinearScale,
+    CategoryScale,
+    ChartOptions,
+    ChartData,
+    Tooltip,
+    Title
+} from 'chart.js';
 
 ChartJS.register(LineElement, PointElement, LinearScale, CategoryScale, Tooltip, Title);
 
 function movingAverage(data: number[], windowSize: number): number[] {
+    if (windowSize <= 1) return data;
+
     const result: number[] = [];
     let sum = 0;
     let queue: number[] = [];
@@ -25,15 +36,31 @@ function movingAverage(data: number[], windowSize: number): number[] {
     return result;
 }
 
+function bucketSamples(data: number[], bucketSize: number): number[] {
+    const result: number[] = [];
+
+    for (let i = 0; i < data.length; i += bucketSize) {
+        const bucket = data.slice(i, i + bucketSize);
+        const avg = bucket.reduce((sum, val) => sum + val, 0) / bucket.length;
+        result.push(avg);
+    }
+
+    return result;
+}
+
+
 export default function WaveformPlot() {
     const [dataPoints, setDataPoints] = useState<number[]>([]);
     const [yAxis, setYAxis] = useState<{ min: number; max: number }>({ min: 0, max: 1 });
+    const [triggerEnabled, setTriggerEnabled] = useState(false);
+    const [triggeredData, setTriggeredData] = useState<number[]>([]);
+
     const [manualZoom, setManualZoom] = useState(200);
     const [xAxisRange, setXAxisRange] = useState({ min: 0, max: manualZoom });
-    const [samplingRate, setSamplingRate] = useState<number>(1000); // Default sampling rate
-    const [showSettings, setShowSettings] = useState<boolean>(false); // State for showing settings modal
 
-    const smoothingSize = 3;
+    let bucketSize = 50;
+    let smoothingSize = 3;
+
 
     useEffect(() => {
         const interval = setInterval(async () => {
@@ -45,7 +72,17 @@ export default function WaveformPlot() {
                     .filter(x => !isNaN(x));
 
                 setDataPoints(prev => {
-                    return [...prev, ...nums].slice(-manualZoom);
+                    const newData = [...prev, ...nums].slice(-manualZoom * bucketSize + 1);
+                    if (triggerEnabled && !triggeredData.length) {
+                        const triggerThreshold = 1.0;
+                        for (let i = 0; i < newData.length; i++) {
+                            if (newData[i] > triggerThreshold) {
+                                setTriggeredData(newData.slice(i));
+                                break;
+                            }
+                        }
+                    }
+                    return newData;
                 });
             } catch (err) {
                 console.error('Serial read error:', err);
@@ -53,12 +90,13 @@ export default function WaveformPlot() {
         }, 50);
 
         return () => clearInterval(interval);
-    }, [manualZoom]);
+    }, [triggerEnabled, triggeredData]);
 
-    const smoothed = movingAverage(dataPoints, smoothingSize);
+    const bucketed = bucketSamples(triggeredData.length ? triggeredData : dataPoints, bucketSize);
+    const smoothed = movingAverage(bucketed, smoothingSize);
 
     const chartData: ChartData<'line'> = {
-        labels: smoothed.map((_, i) => (i / samplingRate).toFixed(3)), // Convert sample index to seconds
+        labels: smoothed.map((_, i) => i.toString()),
         datasets: [
             {
                 label: 'Signal',
@@ -72,7 +110,6 @@ export default function WaveformPlot() {
         ],
     };
 
-    // @ts-ignore
     const options: ChartOptions<'line'> = {
         responsive: true,
         animation: false,
@@ -83,72 +120,81 @@ export default function WaveformPlot() {
             },
             x: {
                 type: 'linear',
-                min: xAxisRange.min / samplingRate,
-                max: xAxisRange.max / samplingRate,
-                ticks: {
-                    callback: function(tickValue: string | number) {
-                        // Convert the tickValue to number (if it's a string) and format it
-                        return Number(tickValue).toFixed(3); // Format X-axis ticks in seconds
-                    },
-                },
-
+                min: xAxisRange.min,
+                max: xAxisRange.max,
             },
         },
     };
 
     function handleAutoScale() {
-        if (smoothed.length < 200) return;
+        // Check if there are enough samples (at least 200) before proceeding
+        if (smoothed.length >= 200) {
+            // Use a more robust peak detection algorithm
+            const peaks: number[] = [];
+            const threshold = 0.1; // Minimum difference between a peak and its neighbors
 
-        const peaks: number[] = [];
-        const threshold = 0.1;
-        const derivatives = smoothed.map((value, index, array) => {
-            if (index === 0 || index === array.length - 1) return 0;
-            return array[index + 1] - array[index - 1];
-        });
+            // Compute the first derivative (differences between consecutive values)
+            const derivatives = smoothed.map((_value, index, array) => {
+                if (index === 0 || index === array.length - 1) return 0; // No derivative at the edges
+                return array[index + 1] - array[index - 1];
+            });
 
-        for (let i = 1; i < smoothed.length - 1; i++) {
-            if (derivatives[i] > threshold && smoothed[i] > smoothed[i - 1] && smoothed[i] > smoothed[i + 1]) {
-                peaks.push(i);
+            // Find peaks based on where the derivative changes sign
+            for (let i = 1; i < smoothed.length - 1; i++) {
+                // Peak detection: look for a change in the sign of the derivative (slope)
+                if (derivatives[i] > threshold && smoothed[i] > smoothed[i - 1] && smoothed[i] > smoothed[i + 1]) {
+                    peaks.push(i); // Local maximum (peak)
+                }
+            }
+
+            // If there are enough peaks, calculate the period (distance between two consecutive peaks)
+            if (peaks.length >= 2) {
+                const period = peaks[1] - peaks[0]; // Distance between the first two peaks
+                const newZoom = period * 2; // Set the zoom level to the detected period (show 1 full cycle)
+                setManualZoom(newZoom);
+                setXAxisRange({
+                    min: 0,
+                    max: newZoom,
+                });
             }
         }
 
-        if (peaks.length >= 2) {
-            const period = peaks[1] - peaks[0];
-            setManualZoom(period * 2);
-            setXAxisRange({
-                min: 0,
-                max: period * 2,
-            });
-        }
-
+        // Also adjust the Y-axis as before to show a full range
         const peakToPeak = Math.max(...smoothed) - Math.min(...smoothed);
-        const padding = peakToPeak * 0.2;
-        setYAxis({
+        const padding = peakToPeak * 0.2; // Add 20% padding to the Y-range
+
+        const newYAxis = {
             min: Math.min(...smoothed) - padding,
             max: Math.max(...smoothed) + padding,
+        };
+
+        setYAxis(newYAxis); // Update Y-axis to full range with padding
+    }
+
+
+    function toggleTrigger() {
+        setTriggerEnabled(prev => !prev);
+        setTriggeredData([]); // Clear the trigger state when toggling
+    }
+
+    function handleManualZoomChange(e: React.ChangeEvent<HTMLInputElement>) {
+        const newZoom = parseInt(e.target.value, 10);
+        if (isNaN(newZoom)) return;
+        setManualZoom(newZoom);
+        setXAxisRange({
+            min: 0,
+            max: newZoom,
         });
+    }
+
+    function handleLog() {
+        console.log("log");
     }
 
     return (
         <div style={{ width: '90%', margin: 'auto', paddingTop: 20 }}>
             <h2 style={{ textAlign: 'center', color: '#fff' }}>Oscilloscope</h2>
             <div style={{ textAlign: 'center', marginBottom: '10px' }}>
-                <button
-                    onClick={() => setShowSettings(true)}
-                    style={{
-                        backgroundColor: 'cyan',
-                        color: 'black',
-                        border: 'none',
-                        borderRadius: '5px',
-                        padding: '8px 16px',
-                        fontSize: '16px',
-                        cursor: 'pointer',
-                        marginRight: '10px',
-                    }}
-                >
-                    Settings
-                </button>
-
                 <button
                     onClick={handleAutoScale}
                     style={{
@@ -164,18 +210,56 @@ export default function WaveformPlot() {
                 >
                     Auto Scale
                 </button>
-            </div>
-
-            {showSettings && (
-                <SettingsModal
-                    onClose={() => setShowSettings(false)}
-                    onSave={(newSamplingRate) => {
-                        setSamplingRate(newSamplingRate);
-                        setShowSettings(false);
+                <button
+                    onClick={toggleTrigger}
+                    style={{
+                        backgroundColor: triggerEnabled ? 'green' : 'red',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '5px',
+                        padding: '8px 16px',
+                        fontSize: '16px',
+                        cursor: 'pointer',
+                        marginRight: '10px',
                     }}
-                />
-            )}
+                >
+                    {triggerEnabled ? 'Trigger On' : 'Trigger Off'}
+                </button>
 
+                <button
+                    onClick={handleLog}
+                    style={{
+                        backgroundColor: "lightyellow",
+                        color: 'black',
+                        border: 'none',
+                        borderRadius: '5px',
+                        padding: '8px 16px',
+                        fontSize: '16px',
+                        cursor: 'pointer',
+                    }}
+                >
+                    Log Export
+                </button>
+
+
+            </div>
+            <div style={{ textAlign: 'center', marginBottom: '10px' }}>
+
+                <input
+                    type="number"
+                    value={manualZoom}
+                    onChange={handleManualZoomChange}
+                    style={{
+                        padding: '8px',
+                        fontSize: '16px',
+                        borderRadius: '5px',
+                        marginLeft: '10px',
+                    }}
+                    min="1"
+                    max={smoothed.length}
+                />
+                <span style={{ marginLeft: '10px', fontSize: '16px' }}>Samples</span>
+            </div>
             <Line data={chartData} options={options} />
         </div>
     );
