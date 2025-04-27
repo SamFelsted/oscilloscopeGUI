@@ -3,15 +3,7 @@
 use std::io::Read;
 use std::time::Duration;
 use serialport::SerialPort;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
-static SAMPLE_INDEX: AtomicUsize = AtomicUsize::new(0);
-
-
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
