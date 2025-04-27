@@ -1,12 +1,12 @@
 #include <Arduino.h>
 
-const int sampleRate = 200000;  // Sample rate (samples per second)
-const float frequency = 10000;  // Frequency of the sine wave (Hz)
-const int amplitude = 1000;     // Amplitude of the sine wave
-const int offset = 1000;        // Offset (vertical shift) of the sine wave
-unsigned long lastSampleTime = 0;  // Time of the last sample (microseconds)
-float phase = 0.0;              // Phase of the sine wave
-const float twoPi = 2.0 * 3.14159265;  // Constant (2 * Pi)
+const int sampleRate = 200000;  
+const float frequency = 1000;  
+const int amplitude = 1000;    
+const int offset = 1000;       
+unsigned long lastSampleTime = 0;  
+float phase = 0.0;              
+const float twoPi = 2.0 * 3.14159265; 
 
 void setup() {
   Serial.begin(1000000);  // Start serial communication at 1 Mbps

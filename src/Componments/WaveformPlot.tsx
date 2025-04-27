@@ -16,9 +16,9 @@ import {
 ChartJS.register(LineElement, PointElement, LinearScale, CategoryScale, Tooltip, Title);
 
 
-let bucketSize = 1;
-let smoothingSize = 1;
-let refreshRate = 20;
+let bucketSize = 15;
+let smoothingSize = 5;
+let refreshRate = 50;
 
 
 
@@ -131,27 +131,23 @@ export default function WaveformPlot() {
     };
 
     function handleAutoScale() {
-        if (smoothed.length >= 200) {
+        if (smoothed.length >= manualZoom / 2) {
 
             const peaks: number[] = [];
-            const threshold = 0.1; // Minimum difference between a peak and its neighbors
+            const threshold = 0.05;
 
-            // Compute the first derivative (differences between consecutive values)
             const derivatives = smoothed.map((_value, index, array) => {
-                if (index === 0 || index === array.length - 1) return 0; // No derivative at the edges
+                if (index === 0 || index === array.length - 1) return 0;
                 return array[index + 1] - array[index - 1];
             });
 
-            // Find peaks based on where the derivative changes sign
             for (let i = 1; i < smoothed.length - 1; i++) {
-                // Peak detection: look for a change in the sign of the derivative (slope)
                 if (derivatives[i] > threshold && smoothed[i] > smoothed[i - 1] && smoothed[i] > smoothed[i + 1]) {
-                    peaks.push(i); // Local maximum (peak)
+                    peaks.push(i);
                 }
             }
 
-            // If there are enough peaks, calculate the period (distance between two consecutive peaks)
-            if (peaks.length >= 2) {
+            if (peaks.length >= 4) {
                 const period = peaks[1] - peaks[0]; // Distance between the first two peaks
                 const newZoom = period * 2; // Set the zoom level to the detected period (show 1 full cycle)
                 setManualZoom(newZoom);
@@ -162,7 +158,6 @@ export default function WaveformPlot() {
             }
         }
 
-        // Also adjust the Y-axis as before to show a full range
         const peakToPeak = Math.max(...smoothed) - Math.min(...smoothed);
         const padding = peakToPeak * 0.3;
 
@@ -171,13 +166,13 @@ export default function WaveformPlot() {
             max: Math.max(...smoothed) + padding,
         };
 
-        setYAxis(newYAxis); // Update Y-axis to full range with padding
+        setYAxis(newYAxis);
     }
 
 
     function toggleTrigger() {
         setTriggerEnabled(prev => !prev);
-        setTriggeredData([]); // Clear the trigger state when toggling
+        setTriggeredData([]);
     }
 
     function handleManualZoomChange(e: React.ChangeEvent<HTMLInputElement>) {
