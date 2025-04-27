@@ -15,6 +15,13 @@ import {
 
 ChartJS.register(LineElement, PointElement, LinearScale, CategoryScale, Tooltip, Title);
 
+
+let bucketSize = 1;
+let smoothingSize = 1;
+let refreshRate = 20;
+
+
+
 function movingAverage(data: number[], windowSize: number): number[] {
     if (windowSize <= 1) return data;
 
@@ -58,9 +65,6 @@ export default function WaveformPlot() {
     const [manualZoom, setManualZoom] = useState(200);
     const [xAxisRange, setXAxisRange] = useState({ min: 0, max: manualZoom });
 
-    let bucketSize = 50;
-    let smoothingSize = 3;
-
 
     useEffect(() => {
         const interval = setInterval(async () => {
@@ -87,10 +91,10 @@ export default function WaveformPlot() {
             } catch (err) {
                 console.error('Serial read error:', err);
             }
-        }, 50);
+        }, refreshRate);
 
         return () => clearInterval(interval);
-    }, [triggerEnabled, triggeredData]);
+    }, [triggerEnabled, triggeredData, manualZoom]);
 
     const bucketed = bucketSamples(triggeredData.length ? triggeredData : dataPoints, bucketSize);
     const smoothed = movingAverage(bucketed, smoothingSize);
@@ -160,7 +164,7 @@ export default function WaveformPlot() {
 
         // Also adjust the Y-axis as before to show a full range
         const peakToPeak = Math.max(...smoothed) - Math.min(...smoothed);
-        const padding = peakToPeak * 0.2; // Add 20% padding to the Y-range
+        const padding = peakToPeak * 0.3;
 
         const newYAxis = {
             min: Math.min(...smoothed) - padding,
@@ -255,7 +259,7 @@ export default function WaveformPlot() {
                         marginLeft: '10px',
                     }}
                     min="1"
-                    max={smoothed.length}
+                    max="10000000"
                 />
                 <span style={{ marginLeft: '10px', fontSize: '16px' }}>Samples</span>
             </div>
