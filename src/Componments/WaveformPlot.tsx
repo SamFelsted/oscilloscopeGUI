@@ -127,9 +127,8 @@ export default function WaveformPlot() {
     };
 
     function handleAutoScale() {
-        // Check if there are enough samples (at least 200) before proceeding
         if (smoothed.length >= 200) {
-            // Use a more robust peak detection algorithm
+
             const peaks: number[] = [];
             const threshold = 0.1; // Minimum difference between a peak and its neighbors
 
