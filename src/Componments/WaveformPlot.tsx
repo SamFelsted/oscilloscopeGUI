@@ -9,9 +9,11 @@ import {
     CategoryScale,
     ChartOptions,
     ChartData,
+    Tooltip,
+    Title
 } from 'chart.js';
 
-ChartJS.register(LineElement, PointElement, LinearScale, CategoryScale);
+ChartJS.register(LineElement, PointElement, LinearScale, CategoryScale, Tooltip, Title);
 
 function movingAverage(data: number[], windowSize: number): number[] {
     if (windowSize <= 1) return data;
@@ -55,7 +57,7 @@ function calculateYAxis(data: number[]) {
     const maxVal = Math.max(...data);
     const center = (minVal + maxVal) / 2;
     const range = (maxVal - minVal) || 1;
-    const scaleFactor = 1.5;
+    const scaleFactor = 2;
     const newHalfRange = (range * scaleFactor) / 2;
 
     return {
@@ -69,6 +71,8 @@ export default function WaveformPlot() {
     const [yAxis, setYAxis] = useState<{ min: number; max: number }>({ min: 0, max: 1 });
     const [triggerEnabled, setTriggerEnabled] = useState(false);
     const [triggeredData, setTriggeredData] = useState<number[]>([]);
+    const [xAxisRange, setXAxisRange] = useState({ min: 0, max: 1000 }); // Default to showing 1000 samples
+    const [manualZoom, setManualZoom] = useState(1000); // Number of samples to show
 
     useEffect(() => {
         const interval = setInterval(async () => {
@@ -80,7 +84,7 @@ export default function WaveformPlot() {
                     .filter(x => !isNaN(x));
 
                 setDataPoints(prev => {
-                    const newData = [...prev, ...nums].slice(-500);
+                    const newData = [...prev, ...nums].slice(-10000);
                     if (triggerEnabled && !triggeredData.length) {
                         const triggerThreshold = 1.0; // Set your threshold for the trigger
                         for (let i = 0; i < newData.length; i++) {
@@ -100,7 +104,7 @@ export default function WaveformPlot() {
         return () => clearInterval(interval);
     }, [triggerEnabled, triggeredData]);
 
-    const bucketed = bucketSamples(triggeredData.length ? triggeredData : dataPoints, 5);
+    const bucketed = bucketSamples(triggeredData.length ? triggeredData : dataPoints, 50);
     const smoothed = movingAverage(bucketed, 10);
 
     const chartData: ChartData<'line'> = {
@@ -126,6 +130,11 @@ export default function WaveformPlot() {
                 min: yAxis.min,
                 max: yAxis.max,
             },
+            x: {
+                type: 'linear',
+                min: xAxisRange.min,
+                max: xAxisRange.max,
+            },
         },
     };
 
@@ -137,6 +146,16 @@ export default function WaveformPlot() {
     function toggleTrigger() {
         setTriggerEnabled(prev => !prev);
         setTriggeredData([]); // Clear the trigger state when toggling
+    }
+
+    function handleManualZoomChange(e: React.ChangeEvent<HTMLInputElement>) {
+        const newZoom = parseInt(e.target.value, 10);
+        if (isNaN(newZoom)) return;
+        setManualZoom(newZoom);
+        setXAxisRange({
+            min: 0,
+            max: newZoom,
+        });
     }
 
     return (
@@ -172,6 +191,23 @@ export default function WaveformPlot() {
                 >
                     {triggerEnabled ? 'Trigger On' : 'Trigger Off'}
                 </button>
+            </div>
+            <div style={{ textAlign: 'center', marginBottom: '10px' }}>
+
+                <input
+                    type="number"
+                    value={manualZoom}
+                    onChange={handleManualZoomChange}
+                    style={{
+                        padding: '8px',
+                        fontSize: '16px',
+                        borderRadius: '5px',
+                        marginLeft: '10px',
+                    }}
+                    min="1"
+                    max={smoothed.length}
+                />
+                <span style={{ marginLeft: '10px', fontSize: '16px' }}>Samples</span>
             </div>
             <Line data={chartData} options={options} />
         </div>

@@ -1,7 +1,7 @@
 #include <Arduino.h>
 
-const int sampleRate = 1000;  
-const float frequency = 1.0; 
+const int sampleRate = 200000;  
+const float frequency = 10; 
 const int amplitude = 1000;  
 const int offset = 1000;     
 unsigned long lastSampleTime = 0;
