@@ -1,5 +1,5 @@
 use std::{
-    io::{Read, Write},
+    io::{self, Read, Write},
     sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -21,7 +21,7 @@ pub fn run() {
     // Spawn the reader thread
     thread::spawn(move || {
         loop {
-            if let Err(e) = read_serial_into_buffer(buffer.clone()) {
+            if let Err(e) = read_serial_into_buffer(buffer.clone(), 1024) {
                 eprintln!("Serial read error: {}", e);
                 thread::sleep(Duration::from_secs(1)); // retry after a moment
             }
@@ -75,8 +75,8 @@ fn get_serial_data() -> Result<Vec<String>, String> {
     }
 }
 
-// Background thread function
-fn read_serial_into_buffer(buffer: Arc<Mutex<Vec<String>>>) -> Result<(), String> {
+
+fn read_serial_into_buffer(buffer: Arc<Mutex<Vec<String>>>, buffer_size: usize) -> Result<(), String> {
     let available_ports = serialport::available_ports()
         .map_err(|e| format!("Failed to list ports: {}", e))?;
 
@@ -98,39 +98,53 @@ fn read_serial_into_buffer(buffer: Arc<Mutex<Vec<String>>>) -> Result<(), String
                 if bytes_read > 0 {
                     let data = String::from_utf8_lossy(&buffer_read[..bytes_read]).to_string();
 
-                    // Write to buffer
-                    {
-                        let mut buf = buffer.lock().map_err(|_| "Failed to lock buffer".to_string())?;
-                        buf.push(data.clone());
-                    }
+                    // Process the data to split it into individual lines
+                    let data_lines = data.split_whitespace(); // Split by whitespace (or any other delimiter)
 
-                    // If recording, also log
-                    if RECORDING.load(Ordering::Relaxed) {
-                        // Lock file safely
-                        if let Ok(mut lock) = LOG_FILE.lock() {
-                            if let Some(file) = lock.as_mut() {
-                                let timestamp = SystemTime::now()
-                                    .duration_since(UNIX_EPOCH)
-                                    .map_err(|e| format!("Failed to get timestamp: {}", e))?
-                                    .as_millis();
+                    // Write each data item to the buffer and the log
+                    for line in data_lines {
+                        let line = line.trim(); // Clean up any extraneous whitespace
 
-                                let csv_line = format!("{},{}\n", timestamp, data.trim_end());
-                                // Write to file without immediate flush (buffering improves performance)
-                                if let Err(e) = file.write_all(csv_line.as_bytes()) {
-                                    eprintln!("Failed to write to log file: {}", e);
+                        if !line.is_empty() {
+                            // Write to buffer
+                            {
+                                let mut buf = buffer.lock().map_err(|_| "Failed to lock buffer".to_string())?;
+                                // Ensure the buffer doesn't exceed the specified size
+                                if buf.len() >= buffer_size {
+                                    buf.remove(0); // Remove the oldest entry to make space for the new one
                                 }
-                                // Ensure the file is flushed every few records
-                                if let Err(e) = file.flush() {
-                                    eprintln!("Failed to flush log file: {}", e);
+                                buf.push(line.to_string());
+                            }
+
+                            // If recording, log each line
+                            if RECORDING.load(Ordering::Relaxed) {
+                                // Lock file safely
+                                if let Ok(mut lock) = LOG_FILE.lock() {
+                                    if let Some(file) = lock.as_mut() {
+                                        let timestamp = SystemTime::now()
+                                            .duration_since(UNIX_EPOCH)
+                                            .map_err(|e| format!("Failed to get timestamp: {}", e))?
+                                            .as_nanos();
+
+                                        let csv_line = format!("{},{}\n", timestamp, line.trim_end());
+
+                                        if let Err(e) = file.write_all(csv_line.as_bytes()) {
+                                            eprintln!("Failed to write to log file: {}", e);
+                                        }
+                                        // Ensure the file is flushed every few records
+                                        if let Err(e) = file.flush() {
+                                            eprintln!("Failed to flush log file: {}", e);
+                                        }
+                                    }
+                                } else {
+                                    eprintln!("Failed to acquire lock for the log file.");
                                 }
                             }
-                        } else {
-                            eprintln!("Failed to acquire lock for the log file.");
                         }
                     }
                 }
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
                 // normal timeout, ignore
             }
             Err(e) => {
