@@ -18,8 +18,8 @@ import {
 ChartJS.register(LineElement, PointElement, LinearScale, CategoryScale, Tooltip, Title);
 
 
-let bucketSize = 5;
-let smoothingSize = 3;
+let bucketSize = 2;
+let smoothingSize = 2;
 let refreshRate = 50;
 
 
@@ -85,14 +85,19 @@ export default function WaveformPlot() {
     useEffect(() => {
         const interval = setInterval(async () => {
             try {
-                const raw = await invoke<string>('read_serial_data');
-                const nums = raw
-                    .split(/[\s,]+/)
-                    .map(x => parseFloat(x))
-                    .filter(x => !isNaN(x));
+                const rawData = await invoke<string[]>('get_serial_data');
+
+                const nums = rawData
+                    .flatMap(chunk =>
+                        chunk
+                            .split(/[\s,]+/)
+                            .map(x => parseFloat(x))
+                            .filter(x => !isNaN(x))
+                    );
 
                 setDataPoints(prev => {
                     const newData = [...prev, ...nums].slice(-manualZoom * bucketSize + 1);
+
                     if (triggerEnabled && !triggeredData.length) {
                         const triggerThreshold = 1.0;
                         for (let i = 0; i < newData.length; i++) {
@@ -102,15 +107,18 @@ export default function WaveformPlot() {
                             }
                         }
                     }
+
                     return newData;
                 });
+
             } catch (err) {
                 console.error('Serial read error:', err);
             }
         }, refreshRate);
 
         return () => clearInterval(interval);
-    }, [triggerEnabled, triggeredData, manualZoom]);
+    }, [triggerEnabled, triggeredData.length, manualZoom, bucketSize, refreshRate]);
+
 
     const bucketed = bucketSamples(triggeredData.length ? triggeredData : dataPoints, bucketSize);
     const smoothed = movingAverage(bucketed, smoothingSize);
@@ -164,8 +172,8 @@ export default function WaveformPlot() {
             }
 
             if (peaks.length >= 4) {
-                const period = peaks[1] - peaks[0]; // Distance between the first two peaks
-                const newZoom = period * 2; // Set the zoom level to the detected period (show 1 full cycle)
+                const period = peaks[1] - peaks[0];
+                const newZoom = period * 2;
                 setManualZoom(newZoom);
                 setXAxisRange({
                     min: 0,
