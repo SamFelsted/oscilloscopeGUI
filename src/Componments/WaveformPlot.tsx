@@ -18,8 +18,8 @@ import {
 ChartJS.register(LineElement, PointElement, LinearScale, CategoryScale, Tooltip, Title);
 
 
-let bucketSize = 2;
-let smoothingSize = 2;
+let bucketSize = 1;
+let smoothingSize = 1;
 let refreshRate = 50;
 
 

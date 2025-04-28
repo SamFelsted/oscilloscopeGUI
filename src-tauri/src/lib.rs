@@ -8,7 +8,6 @@ use std::{
 static RECORDING: AtomicBool = AtomicBool::new(false);
 static LOG_FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
 
-// New global buffer for storing received data
 static mut BUFFER: Option<Arc<Mutex<Vec<String>>>> = None;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -23,7 +22,7 @@ pub fn run() {
         loop {
             if let Err(e) = read_serial_into_buffer(buffer.clone(), 1024) {
                 eprintln!("Serial read error: {}", e);
-                thread::sleep(Duration::from_secs(1)); // retry after a moment
+                thread::sleep(Duration::from_secs(1));
             }
         }
     });
@@ -60,14 +59,13 @@ fn toggle_log(enable: bool) -> Result<(), String> {
     Ok(())
 }
 
-// New: read buffer function for frontend
 #[tauri::command]
 fn get_serial_data() -> Result<Vec<String>, String> {
     unsafe {
         if let Some(buffer) = &BUFFER {
             let mut buf = buffer.lock().map_err(|_| "Failed to lock buffer".to_string())?;
             let data = buf.clone();
-            buf.clear(); // clear after sending to frontend
+            buf.clear();
             Ok(data)
         } else {
             Err("Buffer not initialized".to_string())
@@ -98,20 +96,16 @@ fn read_serial_into_buffer(buffer: Arc<Mutex<Vec<String>>>, buffer_size: usize) 
                 if bytes_read > 0 {
                     let data = String::from_utf8_lossy(&buffer_read[..bytes_read]).to_string();
 
-                    // Process the data to split it into individual lines
-                    let data_lines = data.split_whitespace(); // Split by whitespace (or any other delimiter)
+                    let data_lines = data.split_whitespace();
 
-                    // Write each data item to the buffer and the log
                     for line in data_lines {
-                        let line = line.trim(); // Clean up any extraneous whitespace
+                        let line = line.trim();
 
                         if !line.is_empty() {
-                            // Write to buffer
                             {
                                 let mut buf = buffer.lock().map_err(|_| "Failed to lock buffer".to_string())?;
-                                // Ensure the buffer doesn't exceed the specified size
                                 if buf.len() >= buffer_size {
-                                    buf.remove(0); // Remove the oldest entry to make space for the new one
+                                    buf.remove(0);
                                 }
                                 buf.push(line.to_string());
                             }
@@ -131,7 +125,6 @@ fn read_serial_into_buffer(buffer: Arc<Mutex<Vec<String>>>, buffer_size: usize) 
                                         if let Err(e) = file.write_all(csv_line.as_bytes()) {
                                             eprintln!("Failed to write to log file: {}", e);
                                         }
-                                        // Ensure the file is flushed every few records
                                         if let Err(e) = file.flush() {
                                             eprintln!("Failed to flush log file: {}", e);
                                         }
@@ -145,7 +138,6 @@ fn read_serial_into_buffer(buffer: Arc<Mutex<Vec<String>>>, buffer_size: usize) 
                 }
             }
             Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
-                // normal timeout, ignore
             }
             Err(e) => {
                 return Err(format!("Serial read error: {}", e));
