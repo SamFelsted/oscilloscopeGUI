@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Line } from 'react-chartjs-2';
 import { invoke } from "@tauri-apps/api/core";
+
+
 import {
     Chart as ChartJS,
     LineElement,
@@ -16,9 +18,11 @@ import {
 ChartJS.register(LineElement, PointElement, LinearScale, CategoryScale, Tooltip, Title);
 
 
-let bucketSize = 15;
-let smoothingSize = 5;
+let bucketSize = 5;
+let smoothingSize = 3;
 let refreshRate = 50;
+
+
 
 
 
@@ -56,6 +60,7 @@ function bucketSamples(data: number[], bucketSize: number): number[] {
 }
 
 
+
 export default function WaveformPlot() {
     const [dataPoints, setDataPoints] = useState<number[]>([]);
     const [yAxis, setYAxis] = useState<{ min: number; max: number }>({ min: 0, max: 1 });
@@ -64,6 +69,17 @@ export default function WaveformPlot() {
 
     const [manualZoom, setManualZoom] = useState(200);
     const [xAxisRange, setXAxisRange] = useState({ min: 0, max: manualZoom });
+    const [isRecording, setIsRecording] = useState(false);
+
+    async function handleLogToggle() {
+        try {
+            const newRecordingState = !isRecording;
+            await invoke("toggle_log", { enable: newRecordingState });
+            setIsRecording(newRecordingState);
+        } catch (error) {
+            console.error("Failed to toggle logging:", error);
+        }
+    }
 
 
     useEffect(() => {
@@ -185,13 +201,11 @@ export default function WaveformPlot() {
         });
     }
 
-    function handleLog() {
-        console.log("log");
-    }
 
     return (
-        <div style={{ width: '90%', margin: 'auto', paddingTop: 20 }}>
-            <h2 style={{ textAlign: 'center', color: '#fff' }}>Oscilloscope</h2>
+        <div style={{ width: '90%', margin: 'auto', paddingTop: 0, minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+
+            <h2 style={{ textAlign: 'center', color: '#fff', marginTop: 0  }}>Oscilloscope</h2>
             <div style={{ textAlign: 'center', marginBottom: '10px' }}>
                 <button
                     onClick={handleAutoScale}
@@ -224,21 +238,6 @@ export default function WaveformPlot() {
                     {triggerEnabled ? 'Trigger On' : 'Trigger Off'}
                 </button>
 
-                <button
-                    onClick={handleLog}
-                    style={{
-                        backgroundColor: "lightyellow",
-                        color: 'black',
-                        border: 'none',
-                        borderRadius: '5px',
-                        padding: '8px 16px',
-                        fontSize: '16px',
-                        cursor: 'pointer',
-                    }}
-                >
-                    Log Export
-                </button>
-
 
             </div>
             <div style={{ textAlign: 'center', marginBottom: '10px' }}>
@@ -259,6 +258,78 @@ export default function WaveformPlot() {
                 <span style={{ marginLeft: '10px', fontSize: '16px' }}>Samples</span>
             </div>
             <Line data={chartData} options={options} />
+            <div style={{ textAlign: 'center', marginBottom: '10px' }}>
+                <label style={{ marginRight: '5px' }}>Y Min:</label>
+                <input
+                    type="number"
+                    value={yAxis.min}
+                    onChange={(e) => {
+                        const min = parseFloat(e.target.value);
+                        if (!isNaN(min)) {
+                            setYAxis(prev => ({ ...prev, min }));
+                        }
+                    }}
+                    style={{
+                        padding: '8px',
+                        fontSize: '16px',
+                        borderRadius: '5px',
+                        marginRight: '10px',
+                        width: '100px',
+                    }}
+                />
+                <label style={{ marginRight: '5px' }}>Y Max:</label>
+                <input
+                    type="number"
+                    value={yAxis.max}
+                    onChange={(e) => {
+                        const max = parseFloat(e.target.value);
+                        if (!isNaN(max)) {
+                            setYAxis(prev => ({ ...prev, max }));
+                        }
+                    }}
+                    style={{
+                        padding: '8px',
+                        fontSize: '16px',
+                        borderRadius: '5px',
+                        width: '100px',
+                    }}
+                />
+            </div>
+            <div style={{ textAlign: 'center', marginBottom: '10px' }}>
+                <button
+                    onClick={() => setYAxis({ min: 0, max: 1 })}
+                    style={{
+                        backgroundColor: 'lightblue',
+                        color: 'black',
+                        border: 'none',
+                        borderRadius: '5px',
+                        padding: '8px 16px 8px 16px',
+                        fontSize: '16px',
+                        cursor: 'pointer',
+                        width: '150px',
+                    }}
+                >
+                    Reset Y Axis
+                </button>
+                <button
+                    onClick={handleLogToggle}
+                    style={{
+                        backgroundColor: isRecording ? 'orange' : 'lightyellow',
+                        color: 'black',
+                        border: 'none',
+                        borderRadius: '5px',
+                        padding: '8px 16px 8px 16px',
+                        fontSize: '16px',
+                        cursor: 'pointer',
+                        marginLeft: '10px',
+                        width: '150px',
+                    }}
+                >
+                    {isRecording ? 'Stop Log' : 'Start Log'}
+                </button>
+            </div>
+
+
         </div>
     );
 }

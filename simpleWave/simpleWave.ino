@@ -1,9 +1,9 @@
 #include <Arduino.h>
 
 const int sampleRate = 200000;  
-const float frequency = 1000;  
-const int amplitude = 1000;    
-const int offset = 1000;       
+const float frequency = 100;  
+const int amplitude = 100;    
+const int offset = 100;       
 unsigned long lastSampleTime = 0;  
 float phase = 0.0;              
 const float twoPi = 2.0 * 3.14159265; 
