@@ -23,6 +23,43 @@ let smoothingSize = 1;
 let refreshRate = 50;
 
 
+type ChannelData = {
+    ch1: number[];
+    ch2: number[];
+    ch3: number[];
+    ch4: number[];
+};
+
+function parseChannels(rawData: string[]): ChannelData {
+    const ch1: number[] = [];
+    const ch2: number[] = [];
+    const ch3: number[] = [];
+    const ch4: number[] = [];
+
+    for (let i = 0; i < rawData.length; i++) {
+        const item = rawData[i].toLowerCase();
+
+        if (item === 'h1:' || item === 'ch1:') {
+            const val = parseFloat(rawData[i + 1]);
+            if (!isNaN(val)) ch1.push(val);
+            i += 2; // skip next 2 elements ('value' and 'V')
+        } else if (item === 'ch2:') {
+            const val = parseFloat(rawData[i + 1]);
+            if (!isNaN(val)) ch2.push(val);
+            i += 2;
+        } else if (item === 'ch3:') {
+            const val = parseFloat(rawData[i + 1]);
+            if (!isNaN(val)) ch3.push(val);
+            i += 2;
+        } else if (item === 'ch4:') {
+            const val = parseFloat(rawData[i + 1]);
+            if (!isNaN(val)) ch4.push(val);
+            i += 2;
+        }
+    }
+
+    return { ch1, ch2, ch3, ch4 };
+}
 
 
 
@@ -87,13 +124,14 @@ export default function WaveformPlot() {
             try {
                 const rawData = await invoke<string[]>('get_serial_data');
 
-                const nums = rawData
-                    .flatMap(chunk =>
-                        chunk
-                            .split(/[\s,]+/)
-                            .map(x => parseFloat(x))
-                            .filter(x => !isNaN(x))
-                    );
+                const parsed = parseChannels(rawData);
+                console.log(parsed.ch1);
+                console.log(parsed.ch2);
+                console.log(parsed.ch3);
+                console.log(parsed.ch4);
+
+
+                const nums = parsed.ch1;
 
                 setDataPoints(prev => {
                     const newData = [...prev, ...nums].slice(-manualZoom * bucketSize + 1);
