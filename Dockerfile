@@ -1,34 +1,20 @@
-# Use the official Rust image as the base
-FROM rust:1.77-bullseye
+FROM nailyudha/tauri:latest
 
-# Install system dependencies for Tauri
-RUN apt-get update && \
-    apt-get install -y libwebkit2gtk-4.0-dev libgtk-3-dev libayatana-appindicator3-dev \
-    librsvg2-dev curl build-essential && \
-    rm -rf /var/lib/apt/lists/*
+WORKDIR /home/nonroot
 
-# Install Node.js (LTS) and npm
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y nodejs && \
-    npm install -g npm@latest
+COPY ./package.json ./bun.lockb ./
+RUN bun i --frozen-lockfile
 
-# Create app directory
-WORKDIR /app
-
-# Copy package.json and package-lock.json first for caching
-COPY package.json package-lock.json ./
-
-# Install frontend dependencies
-RUN npm install
-
-# Copy the rest of the app
 COPY . .
+# For building Linux (Support for AMD64 & ARM64)
+RUN bun tauri build
 
-# Install Tauri CLI globally
-RUN npm install -g @tauri-apps/cli
+# For building Android (Support only for AMD64)
+# RUN bun tauri android init \
+#     && bun tauri android build --apk
 
-# Expose the Tauri dev port
-EXPOSE 1420
-
-# Default command: run Tauri dev
-CMD ["npx", "tauri", "dev"] 
+# For building Windows
+## AMD64
+# RUN bun tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc
+## ARM64
+# RUN bun tauri build --runner cargo-xwin --target aarch64-pc-windows-msvc

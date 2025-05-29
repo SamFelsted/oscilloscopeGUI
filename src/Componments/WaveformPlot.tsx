@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import { Line } from 'react-chartjs-2';
 import { invoke } from "@tauri-apps/api/core";
 
-
 import {
     Chart as ChartJS,
     LineElement,
@@ -12,16 +11,18 @@ import {
     ChartOptions,
     ChartData,
     Tooltip,
-    Title
+    Title,
+    Legend
 } from 'chart.js';
 
-ChartJS.register(LineElement, PointElement, LinearScale, CategoryScale, Tooltip, Title);
+ChartJS.register(LineElement, PointElement, LinearScale, CategoryScale, Tooltip, Title, Legend);
 
-
-let bucketSize = 1;
-let smoothingSize = 1;
-let refreshRate = 50;
-
+// Configuration constants
+const CHANNEL_COLORS = ['cyan', 'red', 'green', 'yellow'];
+const REFRESH_RATE = 50; // ms
+const DEFAULT_BUFFER_SIZE = 1000;
+const DEFAULT_SMOOTHING = 1;
+const DEFAULT_BUCKET_SIZE = 1;
 
 type ChannelData = {
     ch1: number[];
@@ -31,53 +32,42 @@ type ChannelData = {
 };
 
 function parseChannels(rawData: string[]): ChannelData {
-    const ch1: number[] = [];
-    const ch2: number[] = [];
-    const ch3: number[] = [];
-    const ch4: number[] = [];
+    const channels: ChannelData = {
+        ch1: [],
+        ch2: [],
+        ch3: [],
+        ch4: []
+    };
 
-    for (let i = 0; i < rawData.length; i++) {
-        const item = rawData[i].toLowerCase();
-
-        if (item === 'h1:' || item === 'ch1:') {
-            const val = parseFloat(rawData[i + 1]);
-            if (!isNaN(val)) ch1.push(val);
-            i += 2; // skip next 2 elements ('value' and 'V')
-        } else if (item === 'ch2:') {
-            const val = parseFloat(rawData[i + 1]);
-            if (!isNaN(val)) ch2.push(val);
-            i += 2;
-        } else if (item === 'ch3:') {
-            const val = parseFloat(rawData[i + 1]);
-            if (!isNaN(val)) ch3.push(val);
-            i += 2;
-        } else if (item === 'ch4:') {
-            const val = parseFloat(rawData[i + 1]);
-            if (!isNaN(val)) ch4.push(val);
-            i += 2;
+    for (const line of rawData) {
+        const match = line.match(/Ch(\d+):\s*([-\d.]+)\s*V/);
+        if (match) {
+            const [, channel, value] = match;
+            const channelNum = parseInt(channel);
+            const voltage = parseFloat(value);
+            
+            if (!isNaN(voltage) && channelNum >= 1 && channelNum <= 4) {
+                const channelKey = `ch${channelNum}` as keyof ChannelData;
+                channels[channelKey].push(voltage);
+            }
         }
     }
 
-    return { ch1, ch2, ch3, ch4 };
+    return channels;
 }
-
-
 
 function movingAverage(data: number[], windowSize: number): number[] {
     if (windowSize <= 1) return data;
-
     const result: number[] = [];
     let sum = 0;
     let queue: number[] = [];
 
-    for (let i = 0; i < data.length; i++) {
-        queue.push(data[i]);
-        sum += data[i];
-
+    for (const value of data) {
+        queue.push(value);
+        sum += value;
         if (queue.length > windowSize) {
             sum -= queue.shift()!;
         }
-
         result.push(sum / queue.length);
     }
 
@@ -85,6 +75,7 @@ function movingAverage(data: number[], windowSize: number): number[] {
 }
 
 function bucketSamples(data: number[], bucketSize: number): number[] {
+    if (bucketSize <= 1) return data;
     const result: number[] = [];
 
     for (let i = 0; i < data.length; i += bucketSize) {
@@ -96,17 +87,25 @@ function bucketSamples(data: number[], bucketSize: number): number[] {
     return result;
 }
 
-
-
 export default function WaveformPlot() {
-    const [dataPoints, setDataPoints] = useState<number[]>([]);
-    const [yAxis, setYAxis] = useState<{ min: number; max: number }>({ min: 0, max: 1 });
+    // State for each channel
+    const [channelData, setChannelData] = useState<ChannelData>({
+        ch1: [],
+        ch2: [],
+        ch3: [],
+        ch4: []
+    });
+    const [activeChannels, setActiveChannels] = useState<boolean[]>([true, false, false, false]);
+    const [yAxis, setYAxis] = useState<{ min: number; max: number }>({ min: -10, max: 10 });
     const [triggerEnabled, setTriggerEnabled] = useState(false);
-    const [triggeredData, setTriggeredData] = useState<number[]>([]);
-
+    const [triggeredData, setTriggeredData] = useState<ChannelData>({
+        ch1: [], ch2: [], ch3: [], ch4: []
+    });
     const [manualZoom, setManualZoom] = useState(200);
     const [xAxisRange, setXAxisRange] = useState({ min: 0, max: manualZoom });
     const [isRecording, setIsRecording] = useState(false);
+    const [smoothingSize, setSmoothingSize] = useState(DEFAULT_SMOOTHING);
+    const [bucketSize, setBucketSize] = useState(DEFAULT_BUCKET_SIZE);
 
     async function handleLogToggle() {
         try {
@@ -118,29 +117,30 @@ export default function WaveformPlot() {
         }
     }
 
-
     useEffect(() => {
         const interval = setInterval(async () => {
             try {
                 const rawData = await invoke<string[]>('get_serial_data');
-
                 const parsed = parseChannels(rawData);
-                console.log(parsed.ch1);
-                console.log(parsed.ch2);
-                console.log(parsed.ch3);
-                console.log(parsed.ch4);
 
+                setChannelData(prev => {
+                    const newData: ChannelData = {
+                        ch1: [...prev.ch1, ...parsed.ch1].slice(-DEFAULT_BUFFER_SIZE),
+                        ch2: [...prev.ch2, ...parsed.ch2].slice(-DEFAULT_BUFFER_SIZE),
+                        ch3: [...prev.ch3, ...parsed.ch3].slice(-DEFAULT_BUFFER_SIZE),
+                        ch4: [...prev.ch4, ...parsed.ch4].slice(-DEFAULT_BUFFER_SIZE)
+                    };
 
-                const nums = parsed.ch1;
-
-                setDataPoints(prev => {
-                    const newData = [...prev, ...nums].slice(-manualZoom * bucketSize + 1);
-
-                    if (triggerEnabled && !triggeredData.length) {
+                    if (triggerEnabled && !triggeredData.ch1.length) {
                         const triggerThreshold = 1.0;
-                        for (let i = 0; i < newData.length; i++) {
-                            if (newData[i] > triggerThreshold) {
-                                setTriggeredData(newData.slice(i));
+                        for (let i = 0; i < newData.ch1.length; i++) {
+                            if (newData.ch1[i] > triggerThreshold) {
+                                setTriggeredData({
+                                    ch1: newData.ch1.slice(i),
+                                    ch2: newData.ch2.slice(i),
+                                    ch3: newData.ch3.slice(i),
+                                    ch4: newData.ch4.slice(i)
+                                });
                                 break;
                             }
                         }
@@ -148,32 +148,39 @@ export default function WaveformPlot() {
 
                     return newData;
                 });
-
             } catch (err) {
                 console.error('Serial read error:', err);
             }
-        }, refreshRate);
+        }, REFRESH_RATE);
 
         return () => clearInterval(interval);
-    }, [triggerEnabled, triggeredData.length, manualZoom, bucketSize, refreshRate]);
+    }, [triggerEnabled, triggeredData.ch1.length]);
 
+    const processChannelData = (data: number[]) => {
+        const bucketed = bucketSamples(data, bucketSize);
+        return movingAverage(bucketed, smoothingSize);
+    };
 
-    const bucketed = bucketSamples(triggeredData.length ? triggeredData : dataPoints, bucketSize);
-    const smoothed = movingAverage(bucketed, smoothingSize);
+    const displayData = triggeredData.ch1.length ? triggeredData : channelData;
+    const processedData = {
+        ch1: processChannelData(displayData.ch1),
+        ch2: processChannelData(displayData.ch2),
+        ch3: processChannelData(displayData.ch3),
+        ch4: processChannelData(displayData.ch4)
+    };
 
     const chartData: ChartData<'line'> = {
-        labels: smoothed.map((_, i) => i.toString()),
-        datasets: [
-            {
-                label: 'Signal',
-                data: smoothed,
-                borderColor: 'cyan',
-                borderWidth: 2,
-                tension: 0.2,
-                fill: false,
-                pointRadius: 0,
-            },
-        ],
+        labels: processedData.ch1.map((_, i) => i.toString()),
+        datasets: activeChannels.map((active, index) => ({
+            label: `Channel ${index + 1}`,
+            data: processedData[`ch${index + 1}` as keyof ChannelData],
+            borderColor: CHANNEL_COLORS[index],
+            borderWidth: 2,
+            tension: 0.2,
+            fill: false,
+            pointRadius: 0,
+            hidden: !active
+        }))
     };
 
     const options: ChartOptions<'line'> = {
@@ -183,76 +190,74 @@ export default function WaveformPlot() {
             y: {
                 min: yAxis.min,
                 max: yAxis.max,
+                title: {
+                    display: true,
+                    text: 'Voltage (V)'
+                }
             },
             x: {
                 type: 'linear',
                 min: xAxisRange.min,
                 max: xAxisRange.max,
-            },
+                title: {
+                    display: true,
+                    text: 'Samples'
+                }
+            }
         },
+        plugins: {
+            legend: {
+                position: 'top' as const,
+                labels: {
+                    color: 'white'
+                }
+            }
+        }
     };
 
     function handleAutoScale() {
-        if (smoothed.length >= manualZoom / 2) {
-
-            const peaks: number[] = [];
-            const threshold = 0.05;
-
-            const derivatives = smoothed.map((_value, index, array) => {
-                if (index === 0 || index === array.length - 1) return 0;
-                return array[index + 1] - array[index - 1];
+        const allValues = Object.values(processedData).flat();
+        if (allValues.length > 0) {
+            const peakToPeak = Math.max(...allValues) - Math.min(...allValues);
+            const padding = peakToPeak * 0.3;
+            setYAxis({
+                min: Math.min(...allValues) - padding,
+                max: Math.max(...allValues) + padding
             });
-
-            for (let i = 1; i < smoothed.length - 1; i++) {
-                if (derivatives[i] > threshold && smoothed[i] > smoothed[i - 1] && smoothed[i] > smoothed[i + 1]) {
-                    peaks.push(i);
-                }
-            }
-
-            if (peaks.length >= 4) {
-                const period = peaks[1] - peaks[0];
-                const newZoom = period * 2;
-                setManualZoom(newZoom);
-                setXAxisRange({
-                    min: 0,
-                    max: newZoom,
-                });
-            }
         }
-
-        const peakToPeak = Math.max(...smoothed) - Math.min(...smoothed);
-        const padding = peakToPeak * 0.3;
-
-        const newYAxis = {
-            min: Math.min(...smoothed) - padding,
-            max: Math.max(...smoothed) + padding,
-        };
-
-        setYAxis(newYAxis);
     }
 
-
-    function toggleTrigger() {
-        setTriggerEnabled(prev => !prev);
-        setTriggeredData([]);
-    }
-
-    function handleManualZoomChange(e: React.ChangeEvent<HTMLInputElement>) {
-        const newZoom = parseInt(e.target.value, 10);
-        if (isNaN(newZoom)) return;
-        setManualZoom(newZoom);
-        setXAxisRange({
-            min: 0,
-            max: newZoom,
+    function toggleChannel(index: number) {
+        setActiveChannels(prev => {
+            const newChannels = [...prev];
+            newChannels[index] = !newChannels[index];
+            return newChannels;
         });
     }
 
-
     return (
         <div style={{ width: '90%', margin: 'auto', paddingTop: 0, minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
-
-            <h2 style={{ textAlign: 'center', color: '#fff', marginTop: 0  }}>Oscilloscope</h2>
+            <h2 style={{ textAlign: 'center', color: '#fff', marginTop: 0 }}>Oscilloscope</h2>
+            
             <div style={{ textAlign: 'center', marginBottom: '10px' }}>
+                {CHANNEL_COLORS.map((color, index) => (
+                    <button
+                        key={index}
+                        onClick={() => toggleChannel(index)}
+                        style={{
+                            backgroundColor: activeChannels[index] ? color : '#444',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '5px',
+                            padding: '8px 16px',
+                            fontSize: '16px',
+                            cursor: 'pointer',
+                            marginRight: '10px',
+                        }}
+                    >
+                        Ch{index + 1}
+                    </button>
+                ))}
                 <button
                     onClick={handleAutoScale}
                     style={{
@@ -269,7 +274,7 @@ export default function WaveformPlot() {
                     Auto Scale
                 </button>
                 <button
-                    onClick={toggleTrigger}
+                    onClick={() => setTriggerEnabled(prev => !prev)}
                     style={{
                         backgroundColor: triggerEnabled ? 'green' : 'red',
                         color: 'white',
@@ -278,32 +283,74 @@ export default function WaveformPlot() {
                         padding: '8px 16px',
                         fontSize: '16px',
                         cursor: 'pointer',
-                        marginRight: '10px',
                     }}
                 >
                     {triggerEnabled ? 'Trigger On' : 'Trigger Off'}
                 </button>
-
-
             </div>
-            <div style={{ textAlign: 'center', marginBottom: '10px' }}>
 
+            <div style={{ textAlign: 'center', marginBottom: '10px' }}>
+                <label style={{ marginRight: '10px' }}>Time Base:</label>
                 <input
                     type="number"
                     value={manualZoom}
-                    onChange={handleManualZoomChange}
+                    onChange={(e) => {
+                        const value = parseInt(e.target.value);
+                        if (!isNaN(value) && value > 0) {
+                            setManualZoom(value);
+                            setXAxisRange({ min: 0, max: value });
+                        }
+                    }}
                     style={{
                         padding: '8px',
                         fontSize: '16px',
                         borderRadius: '5px',
-                        marginLeft: '10px',
+                        width: '100px',
+                        marginRight: '10px'
                     }}
                     min="1"
-                    max="10000000"
                 />
-                <span style={{ marginLeft: '10px', fontSize: '16px' }}>Samples</span>
+                <label style={{ marginRight: '10px' }}>Smoothing:</label>
+                <input
+                    type="number"
+                    value={smoothingSize}
+                    onChange={(e) => {
+                        const value = parseInt(e.target.value);
+                        if (!isNaN(value) && value >= 1) {
+                            setSmoothingSize(value);
+                        }
+                    }}
+                    style={{
+                        padding: '8px',
+                        fontSize: '16px',
+                        borderRadius: '5px',
+                        width: '80px',
+                        marginRight: '10px'
+                    }}
+                    min="1"
+                />
+                <label style={{ marginRight: '10px' }}>Bucket Size:</label>
+                <input
+                    type="number"
+                    value={bucketSize}
+                    onChange={(e) => {
+                        const value = parseInt(e.target.value);
+                        if (!isNaN(value) && value >= 1) {
+                            setBucketSize(value);
+                        }
+                    }}
+                    style={{
+                        padding: '8px',
+                        fontSize: '16px',
+                        borderRadius: '5px',
+                        width: '80px'
+                    }}
+                    min="1"
+                />
             </div>
+
             <Line data={chartData} options={options} />
+
             <div style={{ textAlign: 'center', marginBottom: '10px' }}>
                 <label style={{ marginRight: '5px' }}>Y Min:</label>
                 <input
@@ -338,21 +385,20 @@ export default function WaveformPlot() {
                         fontSize: '16px',
                         borderRadius: '5px',
                         width: '100px',
+                        marginRight: '10px'
                     }}
                 />
-            </div>
-            <div style={{ textAlign: 'center', marginBottom: '10px' }}>
                 <button
-                    onClick={() => setYAxis({ min: 0, max: 1 })}
+                    onClick={() => setYAxis({ min: -10, max: 10 })}
                     style={{
                         backgroundColor: 'lightblue',
                         color: 'black',
                         border: 'none',
                         borderRadius: '5px',
-                        padding: '8px 16px 8px 16px',
+                        padding: '8px 16px',
                         fontSize: '16px',
                         cursor: 'pointer',
-                        width: '150px',
+                        marginRight: '10px',
                     }}
                 >
                     Reset Y Axis
@@ -364,18 +410,14 @@ export default function WaveformPlot() {
                         color: 'black',
                         border: 'none',
                         borderRadius: '5px',
-                        padding: '8px 16px 8px 16px',
+                        padding: '8px 16px',
                         fontSize: '16px',
                         cursor: 'pointer',
-                        marginLeft: '10px',
-                        width: '150px',
                     }}
                 >
                     {isRecording ? 'Stop Log' : 'Start Log'}
                 </button>
             </div>
-
-
         </div>
     );
 }
