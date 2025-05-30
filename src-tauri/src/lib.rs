@@ -400,25 +400,28 @@ fn read_serial_into_buffer(
 
     println!("Selected port: {}", port_info.port_name);
 
-    let mut port = serialport::new(&port_info.port_name, 1000000)
-        .timeout(Duration::from_millis(10))  // Reduced timeout
+    let mut port = serialport::new(&port_info.port_name, 1000000)  // Changed to match Arduino's baud rate
+        .timeout(Duration::from_millis(100))
         .open()
         .map_err(|e| format!("Failed to open {}: {}", port_info.port_name, e))?;
 
     println!("Port opened successfully");
 
-    // Use a smaller buffer to avoid packet splitting
-    let mut buffer_read = vec![0; 32];  // Small enough to avoid splitting packets
-    let mut processor = adc_processor.lock()
-        .map_err(|_| "Failed to lock ADC processor".to_string())?;
+    let mut buffer_read = vec![0; 1024];
 
     loop {
         match port.read(&mut buffer_read) {
             Ok(bytes_read) => {
                 if bytes_read > 0 {
-                    // Process bytes immediately to maintain packet alignment
+                    //println!("Read {} bytes", bytes_read);
+                    //println!("Raw data: {:?}", &buffer_read[..bytes_read]);
+
+                    let mut processor = adc_processor.lock()
+                        .map_err(|_| "Failed to lock ADC processor".to_string())?;
                     processor.add_bytes(&buffer_read[..bytes_read]);
                     let samples = processor.process_packets();
+                    
+                    //println!("Processed {} samples", samples.len());
                     
                     let mut buf = buffer.lock()
                         .map_err(|_| "Failed to lock buffer".to_string())?;
@@ -429,6 +432,8 @@ fn read_serial_into_buffer(
                             sample.channel + 1, 
                             sample.voltage
                         );
+                        
+                        //println!("Formatted sample: {}", line);
                         
                         if buf.len() >= buffer_size {
                             buf.remove(0);
