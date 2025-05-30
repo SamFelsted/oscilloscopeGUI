@@ -98,6 +98,9 @@ export default function WaveformPlot() {
     const [activeChannels, setActiveChannels] = useState<boolean[]>([true, false, false, false]);
     const [yAxis, setYAxis] = useState<{ min: number; max: number }>({ min: -10, max: 10 });
     const [triggerEnabled, setTriggerEnabled] = useState(false);
+    const [triggerLevel, setTriggerLevel] = useState(0.0);
+    const [triggerChannel, setTriggerChannel] = useState(0);
+    const [triggerRisingEdge, setTriggerRisingEdge] = useState(true);
     const [triggeredData, setTriggeredData] = useState<ChannelData>({
         ch1: [], ch2: [], ch3: [], ch4: []
     });
@@ -114,6 +117,27 @@ export default function WaveformPlot() {
             setIsRecording(newRecordingState);
         } catch (error) {
             console.error("Failed to toggle logging:", error);
+        }
+    }
+
+    async function handleTriggerToggle() {
+        const newTriggerState = !triggerEnabled;
+        try {
+            await invoke("configure_trigger", {
+                config: {
+                    enabled: newTriggerState,
+                    channel: triggerChannel,
+                    level: triggerLevel,
+                    rising_edge: triggerRisingEdge
+                }
+            });
+            setTriggerEnabled(newTriggerState);
+            if (!newTriggerState) {
+                // Clear triggered data when disabling trigger
+                setTriggeredData({ ch1: [], ch2: [], ch3: [], ch4: [] });
+            }
+        } catch (error) {
+            console.error("Failed to configure trigger:", error);
         }
     }
 
@@ -274,7 +298,7 @@ export default function WaveformPlot() {
                     Auto Scale
                 </button>
                 <button
-                    onClick={() => setTriggerEnabled(prev => !prev)}
+                    onClick={handleTriggerToggle}
                     style={{
                         backgroundColor: triggerEnabled ? 'green' : 'red',
                         color: 'white',
@@ -283,10 +307,90 @@ export default function WaveformPlot() {
                         padding: '8px 16px',
                         fontSize: '16px',
                         cursor: 'pointer',
+                        marginRight: '10px',
                     }}
                 >
                     {triggerEnabled ? 'Trigger On' : 'Trigger Off'}
                 </button>
+                {triggerEnabled && (
+                    <div style={{ display: 'inline-block', marginLeft: '10px' }}>
+                        <select
+                            value={triggerChannel}
+                            onChange={(e) => {
+                                const channel = parseInt(e.target.value);
+                                setTriggerChannel(channel);
+                                invoke("configure_trigger", {
+                                    config: {
+                                        enabled: triggerEnabled,
+                                        channel,
+                                        level: triggerLevel,
+                                        rising_edge: triggerRisingEdge
+                                    }
+                                });
+                            }}
+                            style={{
+                                padding: '8px',
+                                fontSize: '16px',
+                                borderRadius: '5px',
+                                marginRight: '10px'
+                            }}
+                        >
+                            <option value={0}>Ch1</option>
+                            <option value={1}>Ch2</option>
+                            <option value={2}>Ch3</option>
+                            <option value={3}>Ch4</option>
+                        </select>
+                        <input
+                            type="number"
+                            value={triggerLevel}
+                            onChange={(e) => {
+                                const level = parseFloat(e.target.value);
+                                if (!isNaN(level)) {
+                                    setTriggerLevel(level);
+                                    invoke("configure_trigger", {
+                                        config: {
+                                            enabled: triggerEnabled,
+                                            channel: triggerChannel,
+                                            level,
+                                            rising_edge: triggerRisingEdge
+                                        }
+                                    });
+                                }
+                            }}
+                            style={{
+                                padding: '8px',
+                                fontSize: '16px',
+                                borderRadius: '5px',
+                                width: '100px',
+                                marginRight: '10px'
+                            }}
+                            step="0.1"
+                        />
+                        <select
+                            value={triggerRisingEdge ? 'rising' : 'falling'}
+                            onChange={(e) => {
+                                const rising = e.target.value === 'rising';
+                                setTriggerRisingEdge(rising);
+                                invoke("configure_trigger", {
+                                    config: {
+                                        enabled: triggerEnabled,
+                                        channel: triggerChannel,
+                                        level: triggerLevel,
+                                        rising_edge: rising
+                                    }
+                                });
+                            }}
+                            style={{
+                                padding: '8px',
+                                fontSize: '16px',
+                                borderRadius: '5px'
+                            }}
+                        >
+                            <option value="rising">Rising Edge</option>
+                            <option value="falling">Falling Edge</option>
+                        </select>
+                    </div>
+                )}
             </div>
 
             <div style={{ textAlign: 'center', marginBottom: '10px' }}>

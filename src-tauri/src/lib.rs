@@ -4,16 +4,18 @@ use std::{
     thread,
     time::Duration,
 };
+use serde::{Serialize, Deserialize};
 
 pub mod adc {
     use std::{
         collections::VecDeque,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
-    use serde::Serialize;
+    use serde::{Serialize, Deserialize};
 
     const START_BYTE: u8 = 0xAA;  // 10101010
     const STOP_BYTE: u8 = 0x55;   // 01010101
+    const TRIGGER_BYTE: u8 = 0xCC; // 11001100 - marks trigger point
 
     #[derive(Debug, Clone, Serialize)]
     pub struct AdcSample {
@@ -21,6 +23,15 @@ pub mod adc {
         pub raw_value: u16,
         pub voltage: f32,
         pub timestamp: u128,
+        pub is_trigger: bool,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct TriggerConfig {
+        pub enabled: bool,
+        pub channel: u8,
+        pub level: f32,
+        pub rising_edge: bool,
     }
 
     pub struct PacketProcessor {
@@ -28,6 +39,7 @@ pub mod adc {
         samples_received: usize,
         channel_counts: [usize; 4],
         active_channels: [bool; 4],
+        trigger_config: TriggerConfig,
     }
 
     impl PacketProcessor {
@@ -37,6 +49,12 @@ pub mod adc {
                 samples_received: 0,
                 channel_counts: [0; 4],
                 active_channels: [true, true, false, false], // Default: channels 1 and 2 active
+                trigger_config: TriggerConfig {
+                    enabled: false,
+                    channel: 0,
+                    level: 0.0,
+                    rising_edge: true,
+                },
             }
         }
 
@@ -63,11 +81,30 @@ pub mod adc {
             }
         }
 
+        pub fn configure_trigger(&mut self, config: TriggerConfig) {
+            // Clone config before moving it
+            self.trigger_config = config.clone();
+            
+            // Send trigger configuration to firmware
+            let mut cmd = [START_BYTE, 0xFE, 0, 0, 0, STOP_BYTE];  // Full 6-byte command
+            cmd[2] = (config.enabled as u8) << 4;  // Enable/disable in upper 4 bits
+            cmd[2] |= config.channel & 0x03;  // Channel in lower 2 bits
+            cmd[3] = ((config.level * 32768.0 / 10.0) as i16 >> 8) as u8;  // Level high byte
+            cmd[4] = ((config.level * 32768.0 / 10.0) as i16 & 0xFF) as u8;  // Level low byte
+            cmd[5] = if config.rising_edge { 0x01 } else { 0x00 };  // Edge type
+            
+            // Send the command to the firmware
+            if let Ok(mut port) = serialport::new("COM3", 1000000).open() {
+                let _ = port.write_all(&cmd);
+            }
+        }
+
         pub fn process_packets(&mut self) -> Vec<AdcSample> {
             let mut samples = Vec::new();
+            let mut triggered = false;
             
             // Process all available bytes
-            while self.buffer.len() >= 5 {  // Need 5 bytes: start + channel + data(2) + stop
+            while self.buffer.len() >= 5 {  // Need at least 5 bytes: start + channel + data(2) + stop
                 // Look for start byte
                 while self.buffer.len() >= 5 && self.buffer[0] != START_BYTE {
                     self.buffer.pop_front();  // Skip until we find start byte
@@ -77,39 +114,77 @@ pub mod adc {
                     break;  // Not enough bytes for a complete packet
                 }
                 
-                // Verify we have a complete packet
-                if self.buffer[4] != STOP_BYTE {
+                // Check if we have a trigger marker
+                let has_trigger = self.buffer.len() >= 6 && self.buffer[4] == TRIGGER_BYTE;
+                let packet_size = if has_trigger { 6 } else { 5 };
+                
+                if self.buffer.len() < packet_size {
+                    break;  // Not enough bytes for complete packet
+                }
+                
+                // Verify stop byte
+                let stop_pos = if has_trigger { 5 } else { 4 };
+                if self.buffer[stop_pos] != STOP_BYTE {
                     self.buffer.pop_front();  // Skip invalid packet
                     continue;
                 }
                 
                 // Extract packet data
-                let mut packet = [0u8; 5];
-                for i in 0..5 {
+                let mut packet = vec![0u8; packet_size];
+                for i in 0..packet_size {
                     packet[i] = self.buffer.pop_front().unwrap();
                 }
                 
                 if let Some(sample) = self.decode_packet(&packet) {
                     // Only process samples for active channels
                     if self.active_channels[sample.channel as usize] {
-                        samples.push(sample.clone());  // Clone the sample before moving it
-                        self.samples_received += 1;
-                        self.channel_counts[sample.channel as usize] += 1;
+                        // If trigger is enabled and this is the trigger channel,
+                        // check if it's a trigger point
+                        let is_trigger_point = if self.trigger_config.enabled && 
+                            sample.channel == self.trigger_config.channel {
+                            let voltage = sample.voltage;
+                            if self.trigger_config.rising_edge {
+                                voltage > self.trigger_config.level
+                            } else {
+                                voltage < self.trigger_config.level
+                            }
+                        } else {
+                            sample.is_trigger
+                        };
+
+                        // If we see a trigger point, mark that we're triggered
+                        if is_trigger_point {
+                            triggered = true;
+                        }
+
+                        // Only add samples if we're not using trigger or if we're triggered
+                        if !self.trigger_config.enabled || triggered {
+                            // Create a new sample with the trigger status
+                            let sample = AdcSample {
+                                is_trigger: is_trigger_point,
+                                ..sample
+                            };
+
+                            samples.push(sample.clone());  // Clone the sample before moving it
+                            self.samples_received += 1;
+                            self.channel_counts[sample.channel as usize] += 1;
+                        }
                     }
                 }
             }
             samples
         }
 
-        fn decode_packet(&self, packet: &[u8; 5]) -> Option<AdcSample> {
+        fn decode_packet(&self, packet: &[u8]) -> Option<AdcSample> {
             // Verify start and stop bytes
-            if packet[0] != START_BYTE || packet[4] != STOP_BYTE {
+            if packet[0] != START_BYTE || packet[packet.len() - 1] != STOP_BYTE {
                 return None;
             }
             
             // Extract channel and data
             let channel = packet[1] & 0x03;  // Channel number (0-3)
             let raw_data = ((packet[2] as u16) << 8) | (packet[3] as u16);
+            let is_trigger = packet.len() > 5 && packet[4] == TRIGGER_BYTE;
 
             let voltage = (raw_data as i16 as f32) * (10.0 / 32768.0);
             let timestamp = SystemTime::now()
@@ -122,6 +197,7 @@ pub mod adc {
                 raw_value: raw_data, 
                 voltage, 
                 timestamp,
+                is_trigger,
             })
         }
 
@@ -131,6 +207,10 @@ pub mod adc {
 
         pub fn get_active_channels(&self) -> [bool; 4] {
             self.active_channels
+        }
+
+        pub fn get_trigger_config(&self) -> TriggerConfig {
+            self.trigger_config.clone()
         }
     }
 }
@@ -244,7 +324,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_serial_data,
             toggle_log,
-            set_active_channels
+            set_active_channels,
+            configure_trigger
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -290,6 +371,17 @@ fn set_active_channels(channels: [bool; 4]) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn configure_trigger(config: adc::TriggerConfig) -> Result<(), String> {
+    unsafe {
+        if let Some(processor) = &ADC_PROCESSOR {
+            let mut proc = processor.lock().map_err(|_| "Failed to lock ADC processor".to_string())?;
+            proc.configure_trigger(config);
+        }
+    }
+    Ok(())
+}
+
 fn read_serial_into_buffer(
     buffer: Arc<Mutex<Vec<String>>>, 
     adc_processor: Arc<Mutex<adc::PacketProcessor>>,
@@ -308,28 +400,25 @@ fn read_serial_into_buffer(
 
     println!("Selected port: {}", port_info.port_name);
 
-    let mut port = serialport::new(&port_info.port_name, 1000000)  // Changed to match Arduino's baud rate
-        .timeout(Duration::from_millis(100))
+    let mut port = serialport::new(&port_info.port_name, 1000000)
+        .timeout(Duration::from_millis(10))  // Reduced timeout
         .open()
         .map_err(|e| format!("Failed to open {}: {}", port_info.port_name, e))?;
 
     println!("Port opened successfully");
 
-    let mut buffer_read = vec![0; 1024];
+    // Use a smaller buffer to avoid packet splitting
+    let mut buffer_read = vec![0; 32];  // Small enough to avoid splitting packets
+    let mut processor = adc_processor.lock()
+        .map_err(|_| "Failed to lock ADC processor".to_string())?;
 
     loop {
         match port.read(&mut buffer_read) {
             Ok(bytes_read) => {
                 if bytes_read > 0 {
-                    //println!("Read {} bytes", bytes_read);
-                    //println!("Raw data: {:?}", &buffer_read[..bytes_read]);
-
-                    let mut processor = adc_processor.lock()
-                        .map_err(|_| "Failed to lock ADC processor".to_string())?;
+                    // Process bytes immediately to maintain packet alignment
                     processor.add_bytes(&buffer_read[..bytes_read]);
                     let samples = processor.process_packets();
-                    
-                    //println!("Processed {} samples", samples.len());
                     
                     let mut buf = buffer.lock()
                         .map_err(|_| "Failed to lock buffer".to_string())?;
@@ -340,8 +429,6 @@ fn read_serial_into_buffer(
                             sample.channel + 1, 
                             sample.voltage
                         );
-                        
-                        //println!("Formatted sample: {}", line);
                         
                         if buf.len() >= buffer_size {
                             buf.remove(0);
