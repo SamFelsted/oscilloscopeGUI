@@ -2,26 +2,32 @@ use std::{
     io::{self, Read},
     sync::{Arc, Mutex},
     thread,
-    time::{Duration},
+    time::Duration,
 };
 
 pub mod adc {
-    use std::collections::VecDeque;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::{
+        collections::VecDeque,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
     use serde::Serialize;
+
+    const START_BYTE: u8 = 0xAA;  // 10101010
+    const STOP_BYTE: u8 = 0x55;   // 01010101
 
     #[derive(Debug, Clone, Serialize)]
     pub struct AdcSample {
         pub channel: u8,
         pub raw_value: u16,
         pub voltage: f32,
-        pub timestamp: u128, // Changed to u128 for JSON serialization
+        pub timestamp: u128,
     }
 
     pub struct PacketProcessor {
         buffer: VecDeque<u8>,
         samples_received: usize,
         channel_counts: [usize; 4],
+        active_channels: [bool; 4],
     }
 
     impl PacketProcessor {
@@ -30,6 +36,7 @@ pub mod adc {
                 buffer: VecDeque::with_capacity(1024),
                 samples_received: 0,
                 channel_counts: [0; 4],
+                active_channels: [true, true, false, false], // Default: channels 1 and 2 active
             }
         }
 
@@ -37,31 +44,73 @@ pub mod adc {
             self.buffer.extend(bytes);
         }
 
+        pub fn set_active_channels(&mut self, channels: [bool; 4]) {
+            // Ensure only 2 channels are active
+            let active_count = channels.iter().filter(|&&x| x).count();
+            if active_count > 2 {
+                // If more than 2 channels selected, keep only the first two
+                let mut new_channels = [false; 4];
+                let mut count = 0;
+                for (i, &active) in channels.iter().enumerate() {
+                    if active && count < 2 {
+                        new_channels[i] = true;
+                        count += 1;
+                    }
+                }
+                self.active_channels = new_channels;
+            } else {
+                self.active_channels = channels;
+            }
+        }
+
         pub fn process_packets(&mut self) -> Vec<AdcSample> {
             let mut samples = Vec::new();
-            while self.buffer.len() >= 3 {
-                let mut current_packet = [0u8; 3];
-                current_packet[0] = self.buffer.pop_front().unwrap();
-                current_packet[1] = self.buffer.pop_front().unwrap();
-                current_packet[2] = self.buffer.pop_front().unwrap();
-
-                if let Some(sample) = self.decode_packet(&current_packet) {
-                    let channel = sample.channel;  // Extract channel before moving sample
-                    samples.push(sample);
-                    self.samples_received += 1;
-                    self.channel_counts[channel as usize] += 1;
+            
+            // Process all available bytes
+            while self.buffer.len() >= 5 {  // Need 5 bytes: start + channel + data(2) + stop
+                // Look for start byte
+                while self.buffer.len() >= 5 && self.buffer[0] != START_BYTE {
+                    self.buffer.pop_front();  // Skip until we find start byte
+                }
+                
+                if self.buffer.len() < 5 {
+                    break;  // Not enough bytes for a complete packet
+                }
+                
+                // Verify we have a complete packet
+                if self.buffer[4] != STOP_BYTE {
+                    self.buffer.pop_front();  // Skip invalid packet
+                    continue;
+                }
+                
+                // Extract packet data
+                let mut packet = [0u8; 5];
+                for i in 0..5 {
+                    packet[i] = self.buffer.pop_front().unwrap();
+                }
+                
+                if let Some(sample) = self.decode_packet(&packet) {
+                    // Only process samples for active channels
+                    if self.active_channels[sample.channel as usize] {
+                        samples.push(sample.clone());  // Clone the sample before moving it
+                        self.samples_received += 1;
+                        self.channel_counts[sample.channel as usize] += 1;
+                    }
                 }
             }
             samples
         }
 
-        fn decode_packet(&self, packet: &[u8; 3]) -> Option<AdcSample> {
-            let combined = ((packet[0] as u32) << 10) | 
-                          ((packet[1] as u32) << 2) | 
-                          ((packet[2] as u32) >> 6);
+        fn decode_packet(&self, packet: &[u8; 5]) -> Option<AdcSample> {
+            // Verify start and stop bytes
+            if packet[0] != START_BYTE || packet[4] != STOP_BYTE {
+                return None;
+            }
             
-            let channel = ((combined >> 16) & 0x03) as u8;
-            let raw_data = (combined & 0xFFFF) as u16;
+            // Extract channel and data
+            let channel = packet[1] & 0x03;  // Channel number (0-3)
+            let raw_data = ((packet[2] as u16) << 8) | (packet[3] as u16);
+
             let voltage = (raw_data as i16 as f32) * (10.0 / 32768.0);
             let timestamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -72,12 +121,16 @@ pub mod adc {
                 channel, 
                 raw_value: raw_data, 
                 voltage, 
-                timestamp 
+                timestamp,
             })
         }
 
         pub fn get_stats(&self) -> (usize, [usize; 4]) {
             (self.samples_received, self.channel_counts)
+        }
+
+        pub fn get_active_channels(&self) -> [bool; 4] {
+            self.active_channels
         }
     }
 }
@@ -190,7 +243,8 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_serial_data,
-            toggle_log
+            toggle_log,
+            set_active_channels
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -216,13 +270,24 @@ fn get_serial_data() -> Result<Vec<String>, String> {
         if let Some(buffer) = &BUFFER {
             let mut buf = buffer.lock().map_err(|_| "Failed to lock buffer".to_string())?;
             let data = buf.clone();
-            println!("Sending {} data points to frontend", data.len());
+            //println!("Sending {} data points to frontend", data.len());
             buf.clear();
             Ok(data)
         } else {
             Err("Buffer not initialized".to_string())
         }
     }
+}
+
+#[tauri::command]
+fn set_active_channels(channels: [bool; 4]) -> Result<(), String> {
+    unsafe {
+        if let Some(processor) = &ADC_PROCESSOR {
+            let mut proc = processor.lock().map_err(|_| "Failed to lock ADC processor".to_string())?;
+            proc.set_active_channels(channels);
+        }
+    }
+    Ok(())
 }
 
 fn read_serial_into_buffer(
@@ -243,7 +308,7 @@ fn read_serial_into_buffer(
 
     println!("Selected port: {}", port_info.port_name);
 
-    let mut port = serialport::new(&port_info.port_name, 115200)  // Changed to match Arduino's baud rate
+    let mut port = serialport::new(&port_info.port_name, 1000000)  // Changed to match Arduino's baud rate
         .timeout(Duration::from_millis(100))
         .open()
         .map_err(|e| format!("Failed to open {}: {}", port_info.port_name, e))?;
@@ -256,15 +321,15 @@ fn read_serial_into_buffer(
         match port.read(&mut buffer_read) {
             Ok(bytes_read) => {
                 if bytes_read > 0 {
-                    println!("Read {} bytes", bytes_read);
-                    println!("Raw data: {:?}", &buffer_read[..bytes_read]);
+                    //println!("Read {} bytes", bytes_read);
+                    //println!("Raw data: {:?}", &buffer_read[..bytes_read]);
 
                     let mut processor = adc_processor.lock()
                         .map_err(|_| "Failed to lock ADC processor".to_string())?;
                     processor.add_bytes(&buffer_read[..bytes_read]);
                     let samples = processor.process_packets();
                     
-                    println!("Processed {} samples", samples.len());
+                    //println!("Processed {} samples", samples.len());
                     
                     let mut buf = buffer.lock()
                         .map_err(|_| "Failed to lock buffer".to_string())?;
@@ -276,7 +341,7 @@ fn read_serial_into_buffer(
                             sample.voltage
                         );
                         
-                        println!("Formatted sample: {}", line);
+                        //println!("Formatted sample: {}", line);
                         
                         if buf.len() >= buffer_size {
                             buf.remove(0);
