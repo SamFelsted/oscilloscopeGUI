@@ -1,4 +1,5 @@
-// ADC Simulator - generates test waveforms for different channels
+// Combined ADC Oscilloscope Firmware
+// Combines real ADC reading with advanced trigger and serial communication
 #include <math.h>
 
 // Protocol constants
@@ -6,9 +7,20 @@ const uint8_t START_BYTE = 0xAA;  // 10101010
 const uint8_t STOP_BYTE = 0x55;   // 01010101
 const uint8_t TRIGGER_BYTE = 0xCC; // 11001100 - marks trigger point
 
-// Timing constants
-const unsigned long SAMPLE_INTERVAL = 10;  // 10µs = 100kHz sampling rate
-const int SERIAL_BUFFER_SIZE = 64;        // Buffer size for serial transmission
+// ADC Pin Definitions
+constexpr uint8_t DATA_PINS[16] = {
+  14, 15, 16, 17, 18, 19, 20, 21,
+  22, 23, 24, 25, 26, 27,
+  38, 39
+};
+constexpr uint8_t OS0_PIN      = 0;
+constexpr uint8_t OS1_PIN      = 1;
+constexpr uint8_t OS2_PIN      = 7;
+constexpr uint8_t RESET_PIN    = 28;
+constexpr uint8_t CONVST_PIN   = 8;
+constexpr uint8_t BUSY_PIN     = 29;
+constexpr uint8_t FRSTDATA_PIN = 2;
+constexpr uint8_t RD_PIN       = 33;
 
 // Channel enable/disable state (bits 0-3 for channels 1-4)
 volatile uint8_t channelEnabled = 0x03; // Only channels 1 and 2 enabled by default
@@ -46,45 +58,62 @@ int bufferHead = 0;
 int bufferTail = 0;
 int bufferCount = 0;
 
-// Serial output buffer
-uint8_t serialBuffer[SERIAL_BUFFER_SIZE];
-int serialBufferIndex = 0;
-
-// Timing variables
-unsigned long lastSampleTime = 0;
-unsigned long lastSerialFlushTime = 0;
-const unsigned long SERIAL_FLUSH_INTERVAL = 1000;  // Flush serial buffer every 1ms
-
-// Waveform parameters
-struct WaveformConfig {
-    float frequency;    // Hz
-    float amplitude;    // Vpp (peak-to-peak voltage)
-    bool isSquare;      // true for square wave, false for sine
-    float phase;        // Current phase for continuous generation
-};
-
-WaveformConfig channels[4] = {
-    {10000.0f,  2.0f,  false, 0.0f}, // Ch1: 10kHz 2Vpp sine
-    {100000.0f, 4.0f,  true,  0.0f}, // Ch2: 100kHz 4Vpp square
-    {60000.0f,  10.0f, false, 0.0f}, // Ch3: 60kHz 10Vpp sine  
-    {10000.0f,  5.0f,  true,  0.0f}  // Ch4: 10kHz 5Vpp square
-};
+// Change to 1µs for 1MHz sampling rate
+const unsigned long SAMPLE_INTERVAL = 1;  // 1µs = 1MHz sampling rate
 
 void setup() {
-    Serial.begin(2000000);  // Increased baud rate for better performance
+    Serial.begin(1000000);  // Use higher baud rate for better performance
+
+    // ADC Configuration
+    // oversample = 1×
+    pinMode(OS0_PIN, OUTPUT); digitalWrite(OS0_PIN, LOW);
+    pinMode(OS1_PIN, OUTPUT); digitalWrite(OS1_PIN, LOW);
+    pinMode(OS2_PIN, OUTPUT); digitalWrite(OS2_PIN, LOW);
+
+    // conversion control
+    pinMode(CONVST_PIN, OUTPUT); digitalWrite(CONVST_PIN, LOW);
+    pinMode(BUSY_PIN, INPUT);
+
+    // FRSTDATA (optional)
+    pinMode(FRSTDATA_PIN, INPUT);
+
+    // RD strobe
+    pinMode(RD_PIN, OUTPUT); digitalWrite(RD_PIN, HIGH);
+
+    // data bus inputs
+    for (auto p : DATA_PINS) {
+        pinMode(p, INPUT);
+    }
+
+    // ADC reset left unused
+    pinMode(RESET_PIN, INPUT);
 }
 
-// Add data to serial buffer and flush if necessary
-void addToSerialBuffer(uint8_t byte) {
-    serialBuffer[serialBufferIndex++] = byte;
-    
-    // Flush buffer if it's nearly full or enough time has passed
-    if (serialBufferIndex >= SERIAL_BUFFER_SIZE - 5 || 
-        (micros() - lastSerialFlushTime >= SERIAL_FLUSH_INTERVAL && serialBufferIndex > 0)) {
-        Serial.write(serialBuffer, serialBufferIndex);
-        serialBufferIndex = 0;
-        lastSerialFlushTime = micros();
+// pulse CONVST to start a new conversion
+inline void triggerConversion() {
+    digitalWrite(CONVST_PIN, HIGH);
+    delayMicroseconds(1);
+    digitalWrite(CONVST_PIN, LOW);
+}
+
+// read raw 16-bit unsigned from DB0–DB15
+inline uint16_t readBusRaw() {
+    uint16_t v = 0;
+    for (uint8_t b = 0; b < 16; b++) {
+        v |= (uint16_t(digitalRead(DATA_PINS[b])) << b);
     }
+    return v;
+}
+
+// reinterpret unsigned 16-bit as signed two's-complement
+inline int16_t toSigned(uint16_t u) {
+    return *reinterpret_cast<int16_t*>(&u);
+}
+
+// Convert ADC value to voltage (±10V range)
+float adcToVoltage(uint16_t adcValue) {
+    int16_t signed_val = toSigned(adcValue);
+    return (float)signed_val * 10.0f / 32768.0f;
 }
 
 // Process incoming serial commands
@@ -177,112 +206,84 @@ bool checkTrigger(float voltage) {
     return false;
 }
 
-// Send data packet with start/stop bytes using buffered output
+// Send data packet with start/stop bytes
 void sendChannelData(uint8_t channel, uint16_t rawData, bool is_trigger) {
-    addToSerialBuffer(START_BYTE);
-    addToSerialBuffer(channel);
-    addToSerialBuffer((rawData >> 8) & 0xFF);
-    addToSerialBuffer(rawData & 0xFF);
+    // Send start byte
+    Serial.write(START_BYTE);
     
+    // Send channel and data
+    Serial.write(channel);  // Channel number (0-3)
+    Serial.write((rawData >> 8) & 0xFF);  // Data high byte
+    Serial.write(rawData & 0xFF);         // Data low byte
+    
+    // Send trigger marker if this is a trigger point
     if (is_trigger) {
-        addToSerialBuffer(TRIGGER_BYTE);
+        Serial.write(TRIGGER_BYTE);
     }
     
-    addToSerialBuffer(STOP_BYTE);
-}
-
-// Generate waveform value for a given channel
-float generateWaveform(uint8_t channel, unsigned long timeUs) {
-    WaveformConfig& config = channels[channel];
-    
-    // Update phase based on time and frequency
-    float phaseIncrement = 2.0f * PI * config.frequency * (SAMPLE_INTERVAL / 1000000.0f);
-    config.phase += phaseIncrement;
-    if (config.phase >= 2.0f * PI) {
-        config.phase -= 2.0f * PI;
-    }
-    
-    float voltage;
-    if (config.isSquare) {
-        // Square wave: +/- amplitude/2
-        voltage = (sin(config.phase) >= 0) ? (config.amplitude / 2.0f) : -(config.amplitude / 2.0f);
-    } else {
-        // Sine wave: amplitude/2 * sin(phase)
-        voltage = (config.amplitude / 2.0f) * sin(config.phase);
-    }
-    
-    return voltage;
-}
-
-// Convert voltage to 16-bit signed ADC value (±10V range)
-uint16_t voltageToADC(float voltage) {
-    // Clamp voltage to ±10V range
-    if (voltage > 10.0f) voltage = 10.0f;
-    if (voltage < -10.0f) voltage = -10.0f;
-    
-    // Convert to signed 16-bit (-32768 to +32767)
-    int16_t signed_val = (int16_t)(voltage * 32768.0f / 10.0f);
-    
-    // Reinterpret as unsigned for transmission
-    return *reinterpret_cast<uint16_t*>(&signed_val);
+    // Send stop byte
+    Serial.write(STOP_BYTE);
 }
 
 void loop() {
     // Check for serial commands
     processSerialCommands();
-    
-    unsigned long currentTime = micros();
-    
-    // Generate and send waveform data at precise intervals
-    if (currentTime - lastSampleTime >= SAMPLE_INTERVAL) {
-        lastSampleTime = currentTime;
-        
-        // Generate data for all enabled channels
-        for (uint8_t ch = 0; ch < 4; ch++) {
-            if (channelEnabled & (1 << ch)) {
-                // Generate waveform voltage
-                float voltage = generateWaveform(ch, currentTime);
-                uint16_t adcValue = voltageToADC(voltage);
-                
-                // Check for trigger
-                bool is_trigger = false;
-                if (ch == trigger.channel) {
-                    is_trigger = checkTrigger(voltage);
-                    if (is_trigger) {
-                        trigger.triggered = true;
-                        trigger.armed = false;  // Disarm trigger after firing
-                    }
+
+    // 1) start conversion
+    triggerConversion();
+
+    // 2) wait for BUSY → HIGH, then → LOW
+    while (digitalRead(BUSY_PIN) == LOW)  ;  // wait for conversion to begin
+    while (digitalRead(BUSY_PIN) == HIGH) ;  // wait for conversion to finish
+
+    // 3) clock out four channels via RD strobe and process enabled channels
+    for (uint8_t ch = 0; ch < 4; ch++) {
+        digitalWrite(RD_PIN, LOW);
+        delayMicroseconds(1);              // tD_RDDB ≥ 17 ns
+        uint16_t rawU = readBusRaw();
+        digitalWrite(RD_PIN, HIGH);
+        delayMicroseconds(1);              // tPH_RD ≥ 15 ns
+
+        // Only process data if channel is enabled
+        if (channelEnabled & (1 << ch)) {
+            // Convert ADC value to voltage for trigger checking
+            float voltage = adcToVoltage(rawU);
+            
+            // Check for trigger
+            bool is_trigger = false;
+            if (ch == trigger.channel) {
+                is_trigger = checkTrigger(voltage);
+                if (is_trigger) {
+                    trigger.triggered = true;
+                    trigger.armed = false;  // Disarm trigger after firing
                 }
-                
-                // Add to buffer if trigger is enabled
-                if (trigger.enabled) {
-                    addToBuffer(ch, adcValue, is_trigger);
-                }
-                
-                // Send data
-                sendChannelData(ch, adcValue, is_trigger);
             }
-        }
-        
-        // If trigger fired, send buffered data
-        if (trigger.triggered && bufferCount > 0) {
-            while (bufferCount > 0) {
-                Sample& sample = sampleBuffer[bufferTail];
-                sendChannelData(sample.channel, sample.value, sample.is_trigger);
-                bufferTail = (bufferTail + 1) % BUFFER_SIZE;
-                bufferCount--;
-            }
-            trigger.triggered = false;  // Reset trigger state
+            
+            // Add to buffer if trigger is enabled
             if (trigger.enabled) {
-                trigger.armed = true;   // Re-arm trigger if still enabled
+                addToBuffer(ch, rawU, is_trigger);
             }
+            
+            // Send data
+            sendChannelData(ch, rawU, is_trigger);
+        }
+
+        delayMicroseconds(3);              // tCYC ≈ 3 µs until next channel
+    }
+
+    // If trigger fired, send buffered data
+    if (trigger.triggered && bufferCount > 0) {
+        while (bufferCount > 0) {
+            Sample& sample = sampleBuffer[bufferTail];
+            sendChannelData(sample.channel, sample.value, sample.is_trigger);
+            bufferTail = (bufferTail + 1) % BUFFER_SIZE;
+            bufferCount--;
+        }
+        trigger.triggered = false;  // Reset trigger state
+        if (trigger.enabled) {
+            trigger.armed = true;   // Re-arm trigger if still enabled
         }
     }
-    
-    // Ensure serial buffer is flushed periodically
-    if (serialBufferIndex > 0 && currentTime - lastSerialFlushTime >= SERIAL_FLUSH_INTERVAL) {
-        Serial.write(serialBuffer, serialBufferIndex);
-        serialBufferIndex = 0;
-        lastSerialFlushTime = currentTime;
-    }
-}
+
+    delay(10);  // Main loop delay
+} 
